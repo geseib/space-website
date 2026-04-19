@@ -1,16 +1,14 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 
-// A regular grid of galaxies so "distance in space units" is obvious.
 const GRID = 5
-const SPACING = 56 // pixels per "space unit" in the initial universe
+const SPACING = 56
 
 function buildGrid() {
   const out = []
   for (let row = 0; row < GRID; row++) {
     for (let col = 0; col < GRID; col++) {
-      const id = row * GRID + col
       out.push({
-        id,
+        id: row * GRID + col,
         col, row,
         x: (col - (GRID - 1) / 2) * SPACING,
         y: (row - (GRID - 1) / 2) * SPACING,
@@ -21,44 +19,81 @@ function buildGrid() {
   return out
 }
 
+const ANIM_MS = 2200
+
 export default function ExpandingUniverse() {
   const [scale, setScale] = useState(1)
-  const [refId, setRefId] = useState(12) // center galaxy of 5x5 grid
+  const [animating, setAnimating] = useState(false)
+  const [refId, setRefId] = useState(12)
+
+  const scaleRef = useRef(1)
+  const rafRef = useRef(null)
+
   const galaxies = useMemo(buildGrid, [])
   const ref = galaxies.find(g => g.id === refId) ?? galaxies[12]
 
-  // Uniform expansion from the chosen reference galaxy:
-  //   P'  =  R  +  (P - R) * scale
-  // means every distance from R is multiplied by `scale`, no matter which
-  // galaxy you stand on — this is exactly what Hubble's Law describes.
-  const positioned = galaxies.map(g => ({
-    ...g,
-    x: ref.x + (g.x - ref.x) * scale,
-    y: ref.y + (g.y - ref.y) * scale,
-    origX: g.x,
-    origY: g.y,
-    unitsFromRef: Math.round(
-      Math.hypot(g.col - ref.col, g.row - ref.row) * 10,
-    ) / 10,
-  }))
+  // Animate smoothly to a target scale so kids literally see far galaxies
+  // zoom away while close ones crawl.
+  function animateTo(target) {
+    if (rafRef.current) cancelAnimationFrame(rafRef.current)
+    const from = scaleRef.current
+    const start = performance.now()
+    setAnimating(true)
+    const tick = now => {
+      const t = Math.min(1, (now - start) / ANIM_MS)
+      const next = from + (target - from) * t
+      scaleRef.current = next
+      setScale(next)
+      if (t < 1) {
+        rafRef.current = requestAnimationFrame(tick)
+      } else {
+        setAnimating(false)
+      }
+    }
+    rafRef.current = requestAnimationFrame(tick)
+  }
 
-  // Pick two galaxies to highlight with a numeric "before → after" label:
-  // the nearest non-reference neighbor and a far one.
-  const others = positioned
-    .filter(g => g.id !== ref.id)
-    .sort((a, b) => a.unitsFromRef - b.unitsFromRef)
-  const near = others[0]
-  const far = others[others.length - 1]
+  function handleSlider(v) {
+    if (rafRef.current) cancelAnimationFrame(rafRef.current)
+    setAnimating(false)
+    scaleRef.current = v
+    setScale(v)
+  }
+
+  useEffect(() => () => { if (rafRef.current) cancelAnimationFrame(rafRef.current) }, [])
+
+  const maxUnits = Math.hypot(GRID - 1, GRID - 1)
+
+  const positioned = galaxies.map(g => {
+    const du = Math.hypot(g.col - ref.col, g.row - ref.row)
+    return {
+      ...g,
+      x: ref.x + (g.x - ref.x) * scale,
+      y: ref.y + (g.y - ref.y) * scale,
+      origX: g.x,
+      origY: g.y,
+      unitsFromRef: du,
+    }
+  })
+
+  // For labels: pick one close, one middle, one far.
+  const sorted = positioned.filter(g => g.id !== ref.id)
+                           .sort((a, b) => a.unitsFromRef - b.unitsFromRef)
+  const labelGalaxies = [
+    sorted[0],
+    sorted[Math.floor(sorted.length / 2)],
+    sorted[sorted.length - 1],
+  ].filter(Boolean)
 
   return (
     <div className="panel">
       <h2>The Universe Is Stretching!</h2>
       <p className="lead">
-        Pick any galaxy to stand on. Then press <strong>Double the universe</strong>.
-        Every galaxy's distance from you <em>doubles</em>. A galaxy that was 1 space away
-        is now 2 (it moved 1 space). A galaxy that was 3 spaces away is now 6
-        (it moved 3!). Same time, bigger trip — so far galaxies look faster. That's
-        Hubble's Law.
+        Pick any galaxy to stand on. Then press <strong>Double the universe</strong> and
+        <em> watch carefully</em>. The galaxies in the far corners <em>zoom</em> away
+        while nearby ones barely drift. Same amount of time passes for all of them —
+        but far galaxies had to travel farther, so they look faster. That's Hubble's
+        Law.
       </p>
 
       <div className="stage-svg-wrap">
@@ -75,7 +110,7 @@ export default function ExpandingUniverse() {
           </defs>
           <rect x="-260" y="-260" width="520" height="520" fill="url(#bgGrad2)" rx="20" />
 
-          {/* Dashed trail from original position to current position. */}
+          {/* Dashed trail from start position to current position. */}
           {positioned.map(g => {
             if (g.id === ref.id) return null
             return (
@@ -85,23 +120,36 @@ export default function ExpandingUniverse() {
                 x1={g.origX} y1={g.origY}
                 x2={g.x} y2={g.y}
                 stroke={`hsl(${g.hue},90%,75%)`}
-                strokeWidth="1.5"
+                strokeWidth={1.5}
               />
             )
           })}
 
-          {/* Velocity arrows on the two highlighted galaxies. */}
-          {scale > 1 && [near, far].map(g => (
-            <line
-              key={'arr-' + g.id}
-              x1={g.origX} y1={g.origY}
-              x2={g.x} y2={g.y}
-              stroke="#ffe6a8" strokeWidth="2.5"
-              markerEnd="url(#arrow2)"
-            />
-          ))}
+          {/* Velocity arrows on ALL galaxies — length ∝ distance from ref.
+              Thicker for labeled ones so the comparison pops. */}
+          {scale > 1.02 && positioned.map(g => {
+            if (g.id === ref.id) return null
+            const dx = g.x - g.origX
+            const dy = g.y - g.origY
+            // Draw arrow from current pos in direction of motion, length = step.
+            const len = Math.hypot(dx, dy)
+            if (len < 2) return null
+            const isLabeled = labelGalaxies.some(l => l.id === g.id)
+            return (
+              <line
+                key={'vel-' + g.id}
+                x1={g.x} y1={g.y}
+                x2={g.x + dx * 0.45}
+                y2={g.y + dy * 0.45}
+                stroke="#ffe6a8"
+                strokeWidth={isLabeled ? 3 : 1.4}
+                strokeOpacity={isLabeled ? 1 : 0.55}
+                markerEnd="url(#arrow2)"
+              />
+            )
+          })}
 
-          {/* Galaxies (buttons so kids can tap to choose). */}
+          {/* Galaxies */}
           {positioned.map(g => {
             const isRef = g.id === ref.id
             const size = isRef ? 14 : 9
@@ -119,53 +167,59 @@ export default function ExpandingUniverse() {
             )
           })}
 
-          {/* Label on the reference galaxy. */}
           <text x={ref.x} y={ref.y - 22} textAnchor="middle"
                 fill="#fff" fontSize="13" fontWeight="800">
             YOU
           </text>
 
-          {/* before → after distance labels on near & far galaxies. */}
-          {[near, far].map(g => (
-            <g key={'lab-' + g.id}>
-              <rect
-                x={g.x - 28} y={g.y + 14}
-                width="56" height="20" rx="10"
-                fill="#0b0b2a" stroke="#ffe6a8" strokeWidth="1"
-              />
-              <text
-                x={g.x} y={g.y + 28}
-                textAnchor="middle" fill="#ffe6a8"
-                fontSize="11" fontWeight="700"
-              >
-                {g.unitsFromRef} → {(g.unitsFromRef * scale).toFixed(1)}
-              </text>
-            </g>
-          ))}
+          {/* Before → After distance labels on the three sample galaxies. */}
+          {labelGalaxies.map(g => {
+            const before = g.unitsFromRef.toFixed(1)
+            const after = (g.unitsFromRef * scale).toFixed(1)
+            return (
+              <g key={'lab-' + g.id}>
+                <rect
+                  x={g.x - 32} y={g.y + 14}
+                  width="64" height="20" rx="10"
+                  fill="#0b0b2a" stroke="#ffe6a8" strokeWidth="1"
+                />
+                <text
+                  x={g.x} y={g.y + 28}
+                  textAnchor="middle" fill="#ffe6a8"
+                  fontSize="11" fontWeight="700"
+                >
+                  {before} → {after}
+                </text>
+              </g>
+            )
+          })}
         </svg>
       </div>
 
       <div className="controls">
-        <button onClick={() => setScale(s => Math.min(4, +(s * 2).toFixed(2)))}>
-          Double the universe!
+        <button
+          disabled={animating}
+          onClick={() => animateTo(Math.min(3, +(scaleRef.current * 2).toFixed(2)))}
+        >
+          {animating ? 'Expanding…' : 'Double the universe!'}
         </button>
         <label>
-          Or slide to stretch (scale: {scale.toFixed(2)}×)
+          Or drag to stretch (scale: {scale.toFixed(2)}×)
           <input
             type="range" min="1" max="3" step="0.01"
             value={scale}
-            onChange={e => setScale(parseFloat(e.target.value))}
+            onChange={e => handleSlider(parseFloat(e.target.value))}
           />
         </label>
-        <button onClick={() => setScale(1)}>Reset</button>
+        <button onClick={() => { handleSlider(1) }}>Reset</button>
       </div>
 
       <p className="caption">
-        Try it: click the <strong>closest</strong> galaxy to YOU, then click a galaxy in
-        the far corner. Watch the yellow numbers. Same amount of time passes, but the
-        far galaxy moved way more space — so to anyone watching from YOU, it looks like
-        it's running away faster. And here's the wild part: every galaxy sees the
-        universe this way. Tap a different galaxy and it looks like the center too!
+        Watch the <strong>yellow arrows</strong>: the far galaxy's arrow is huge, the
+        near galaxy's arrow is tiny. Each one shows how much space the galaxy covered
+        in the <em>same</em> amount of time. Bigger arrow = faster, and the arrow gets
+        bigger the farther away the galaxy started. Try clicking a galaxy in the
+        corner — from <em>its</em> point of view, YOU are the one zooming away!
       </p>
     </div>
   )
