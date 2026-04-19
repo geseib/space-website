@@ -1,114 +1,158 @@
 import { useMemo, useState } from 'react'
 
-// Deterministic pseudo-random number generator so galaxies stay in the
-// same spot between renders.
-function mulberry32(seed) {
-  return function () {
-    seed |= 0
-    seed = (seed + 0x6d2b79f5) | 0
-    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed)
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+// A regular grid of galaxies so "distance in space units" is obvious.
+const GRID = 5
+const SPACING = 56 // pixels per "space unit" in the initial universe
+
+function buildGrid() {
+  const out = []
+  for (let row = 0; row < GRID; row++) {
+    for (let col = 0; col < GRID; col++) {
+      const id = row * GRID + col
+      out.push({
+        id,
+        col, row,
+        x: (col - (GRID - 1) / 2) * SPACING,
+        y: (row - (GRID - 1) / 2) * SPACING,
+        hue: (col * 47 + row * 83) % 360,
+      })
+    }
   }
+  return out
 }
 
 export default function ExpandingUniverse() {
   const [scale, setScale] = useState(1)
+  const [refId, setRefId] = useState(12) // center galaxy of 5x5 grid
+  const galaxies = useMemo(buildGrid, [])
+  const ref = galaxies.find(g => g.id === refId) ?? galaxies[12]
 
-  const galaxies = useMemo(() => {
-    const rng = mulberry32(17)
-    return Array.from({ length: 12 }, (_, i) => {
-      const angle = rng() * Math.PI * 2
-      const r = 35 + rng() * 160
-      return {
-        id: i,
-        x: Math.cos(angle) * r,
-        y: Math.sin(angle) * r,
-        hue: Math.floor(rng() * 360),
-        size: 5 + rng() * 7,
-        r,
-      }
-    })
-  }, [])
+  // Uniform expansion from the chosen reference galaxy:
+  //   P'  =  R  +  (P - R) * scale
+  // means every distance from R is multiplied by `scale`, no matter which
+  // galaxy you stand on — this is exactly what Hubble's Law describes.
+  const positioned = galaxies.map(g => ({
+    ...g,
+    x: ref.x + (g.x - ref.x) * scale,
+    y: ref.y + (g.y - ref.y) * scale,
+    origX: g.x,
+    origY: g.y,
+    unitsFromRef: Math.round(
+      Math.hypot(g.col - ref.col, g.row - ref.row) * 10,
+    ) / 10,
+  }))
+
+  // Pick two galaxies to highlight with a numeric "before → after" label:
+  // the nearest non-reference neighbor and a far one.
+  const others = positioned
+    .filter(g => g.id !== ref.id)
+    .sort((a, b) => a.unitsFromRef - b.unitsFromRef)
+  const near = others[0]
+  const far = others[others.length - 1]
 
   return (
     <div className="panel">
       <h2>The Universe Is Stretching!</h2>
       <p className="lead">
-        Imagine sprinkles stuck on a balloon. When you blow it up, every sprinkle moves
-        away from every other sprinkle — and sprinkles that start <em>far apart</em> pull
-        apart faster than sprinkles that are close. Space stretches the same way, so
-        galaxies that are far away look like they're zooming away much faster than
-        the nearby ones.
+        Pick any galaxy to stand on. Then press <strong>Double the universe</strong>.
+        Every galaxy's distance from you <em>doubles</em>. A galaxy that was 1 space away
+        is now 2 (it moved 1 space). A galaxy that was 3 spaces away is now 6
+        (it moved 3!). Same time, bigger trip — so far galaxies look faster. That's
+        Hubble's Law.
       </p>
 
       <div className="stage-svg-wrap">
-        <svg viewBox="-220 -220 440 440" className="stage-svg" aria-label="Expanding universe visualization">
+        <svg viewBox="-260 -260 520 520" className="stage-svg" aria-label="Expanding universe grid">
           <defs>
-            <radialGradient id="bgGrad" cx="50%" cy="50%" r="75%">
+            <radialGradient id="bgGrad2" cx="50%" cy="50%" r="75%">
               <stop offset="0%" stopColor="#1a1a55" />
               <stop offset="100%" stopColor="#05050f" />
             </radialGradient>
-            <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5"
+            <marker id="arrow2" viewBox="0 0 10 10" refX="9" refY="5"
                     markerWidth="5" markerHeight="5" orient="auto-start-reverse">
               <path d="M0,0 L10,5 L0,10 Z" fill="#ffe6a8" />
             </marker>
           </defs>
-          <rect x="-220" y="-220" width="440" height="440" fill="url(#bgGrad)" rx="20" />
+          <rect x="-260" y="-260" width="520" height="520" fill="url(#bgGrad2)" rx="20" />
 
-          {/* faint grid that stretches with scale */}
-          <g opacity="0.12" stroke="#aac">
-            {[-3, -2, -1, 0, 1, 2, 3].map(i => (
-              <g key={i}>
-                <line x1={i * 50 * scale} y1={-210} x2={i * 50 * scale} y2={210} />
-                <line x1={-210} y1={i * 50 * scale} x2={210} y2={i * 50 * scale} />
-              </g>
-            ))}
-          </g>
-
-          {galaxies.map(g => {
-            const x = g.x * scale
-            const y = g.y * scale
-            const hue = g.hue
+          {/* Dashed trail from original position to current position. */}
+          {positioned.map(g => {
+            if (g.id === ref.id) return null
             return (
-              <g key={g.id}>
-                {/* trail from starting position to current position */}
-                <line
-                  className="galaxy-trail"
-                  x1={g.x} y1={g.y} x2={x} y2={y}
-                  stroke={`hsl(${hue},90%,75%)`} strokeWidth="1.5"
+              <line
+                key={'trail-' + g.id}
+                className="galaxy-trail"
+                x1={g.origX} y1={g.origY}
+                x2={g.x} y2={g.y}
+                stroke={`hsl(${g.hue},90%,75%)`}
+                strokeWidth="1.5"
+              />
+            )
+          })}
+
+          {/* Velocity arrows on the two highlighted galaxies. */}
+          {scale > 1 && [near, far].map(g => (
+            <line
+              key={'arr-' + g.id}
+              x1={g.origX} y1={g.origY}
+              x2={g.x} y2={g.y}
+              stroke="#ffe6a8" strokeWidth="2.5"
+              markerEnd="url(#arrow2)"
+            />
+          ))}
+
+          {/* Galaxies (buttons so kids can tap to choose). */}
+          {positioned.map(g => {
+            const isRef = g.id === ref.id
+            const size = isRef ? 14 : 9
+            return (
+              <g key={g.id} style={{ cursor: 'pointer' }} onClick={() => setRefId(g.id)}>
+                <circle cx={g.x} cy={g.y} r={size + 8} fill="transparent" />
+                <circle
+                  cx={g.x} cy={g.y} r={size}
+                  fill={isRef ? '#ffe66d' : `hsl(${g.hue},75%,65%)`}
+                  stroke="#fff"
+                  strokeOpacity={isRef ? 1 : 0.35}
+                  strokeWidth={isRef ? 2.5 : 1}
                 />
-                {/* velocity arrow: longer for galaxies that are farther */}
-                {scale > 1 && (
-                  <line
-                    x1={x} y1={y}
-                    x2={x + (g.x * 0.35)}
-                    y2={y + (g.y * 0.35)}
-                    stroke="#ffe6a8" strokeWidth="2"
-                    markerEnd="url(#arrow)"
-                  />
-                )}
-                <circle cx={x} cy={y} r={g.size}
-                        fill={`hsl(${hue},75%,65%)`}
-                        stroke="#fff" strokeOpacity="0.35" strokeWidth="1" />
               </g>
             )
           })}
 
-          {/* YOU at the center */}
-          <g>
-            <circle cx="0" cy="0" r="13" fill="#ffe66d" stroke="#fff" strokeWidth="2" />
-            <circle cx="0" cy="0" r="22" fill="none" stroke="#ffe66d" strokeOpacity="0.4" strokeWidth="2" />
-            <text x="0" y="-28" textAnchor="middle" fill="#fff" fontSize="14" fontWeight="800">YOU</text>
-          </g>
+          {/* Label on the reference galaxy. */}
+          <text x={ref.x} y={ref.y - 22} textAnchor="middle"
+                fill="#fff" fontSize="13" fontWeight="800">
+            YOU
+          </text>
+
+          {/* before → after distance labels on near & far galaxies. */}
+          {[near, far].map(g => (
+            <g key={'lab-' + g.id}>
+              <rect
+                x={g.x - 28} y={g.y + 14}
+                width="56" height="20" rx="10"
+                fill="#0b0b2a" stroke="#ffe6a8" strokeWidth="1"
+              />
+              <text
+                x={g.x} y={g.y + 28}
+                textAnchor="middle" fill="#ffe6a8"
+                fontSize="11" fontWeight="700"
+              >
+                {g.unitsFromRef} → {(g.unitsFromRef * scale).toFixed(1)}
+              </text>
+            </g>
+          ))}
         </svg>
       </div>
 
       <div className="controls">
+        <button onClick={() => setScale(s => Math.min(4, +(s * 2).toFixed(2)))}>
+          Double the universe!
+        </button>
         <label>
-          Blow up the universe (scale factor: {scale.toFixed(2)}×)
+          Or slide to stretch (scale: {scale.toFixed(2)}×)
           <input
-            type="range" min="1" max="2.8" step="0.01"
+            type="range" min="1" max="3" step="0.01"
             value={scale}
             onChange={e => setScale(parseFloat(e.target.value))}
           />
@@ -117,10 +161,11 @@ export default function ExpandingUniverse() {
       </div>
 
       <p className="caption">
-        Look at the dashed trails. A galaxy that started far from YOU has a longer trail
-        than one that started close. Because they all travel in the same amount of time,
-        the far galaxy has to go faster — that's <strong>Hubble's Law</strong>. Space itself
-        is stretching, not the galaxies flying through it!
+        Try it: click the <strong>closest</strong> galaxy to YOU, then click a galaxy in
+        the far corner. Watch the yellow numbers. Same amount of time passes, but the
+        far galaxy moved way more space — so to anyone watching from YOU, it looks like
+        it's running away faster. And here's the wild part: every galaxy sees the
+        universe this way. Tap a different galaxy and it looks like the center too!
       </p>
     </div>
   )
